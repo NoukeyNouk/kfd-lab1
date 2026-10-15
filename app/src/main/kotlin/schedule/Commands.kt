@@ -13,22 +13,88 @@ object StudentCommandHandlers : CommandHandlers {
 }
 
 fun runPeriod(command: Command.Period): Int {
-    // TODO: parse every line of command.file, filter by command.from..command.to,
-    // print the selected sessions and Total, return 0 or 1.
-    println("Not implemented: period")
-    return 2
+    var hasErrors = false
+    var totalSelected = 0
+    forEachScheduleLine(command.file) { lineNumber, line ->
+        when (val result = parseSessionLine(lineNumber, line)) {
+            is ParseResult.Failure -> hasErrors = true
+            is ParseResult.Success -> {
+                val session = result.session
+                if (session.date in command.from..command.to) {
+                    val location = when (session) {
+                        is Lecture -> session.location
+                        is Practice -> session.location
+                        is Exam -> session.location
+                        is Cancelled -> "-"
+                        else -> error("Unknown session: $session")
+                    }
+                    val typeName = when (session) {
+                        is Lecture -> "LECTURE"
+                        is Practice -> "PRACTICE"
+                        is Exam -> "EXAM"
+                        is Cancelled -> "CANCELLED"
+                        else -> error("Unknown session: $session")
+                    }
+                    println("${session.date} | $typeName | ${session.topic} | $location")
+                    totalSelected++
+                }
+            }
+        }
+    }
+    println("Total: $totalSelected")
+    return if (hasErrors) 1 else 0
 }
 
 fun runType(command: Command.ByType): Int {
-    // TODO: parse every line of command.file, filter by command.type,
-    // print the selected sessions with teachers and Total, return 0 or 1.
-    println("Not implemented: type")
-    return 2
+    var hasErrors = false
+    var totalSelected = 0
+    forEachScheduleLine(command.file) { lineNumber, line ->
+        when (val result = parseSessionLine(lineNumber, line)) {
+            is ParseResult.Failure -> hasErrors = true
+            is ParseResult.Success -> {
+                val session = result.session
+                val matches = when (command.type) {
+                    SessionType.LECTURE -> session is Lecture
+                    SessionType.PRACTICE -> session is Practice
+                    SessionType.EXAM -> session is Exam
+                    SessionType.CANCELLED -> session is Cancelled
+                }
+                if (matches) {
+                    val location = when (session) {
+                        is Lecture -> session.location
+                        is Practice -> session.location
+                        is Exam -> session.location
+                        is Cancelled -> "-"
+                        else -> error("Unknown session: $session")
+                    }
+                    val teachers = when (session) {
+                        is Lecture -> session.teachers.joinToString(", ")
+                        is Practice -> session.teachers.joinToString(", ")
+                        is Exam -> session.teachers.joinToString(", ")
+                        is Cancelled -> "-"
+                        else -> error("Unknown session: $session")
+                    }
+                    println("${session.date} | ${command.type.name} | ${session.topic} | $location | $teachers")
+                    totalSelected++
+                }
+            }
+        }
+    }
+    println("Total: $totalSelected")
+    return if (hasErrors) 1 else 0
 }
 
 fun runErrors(command: Command.Errors): Int {
-    // TODO: parse every line of command.file, print formatted rejections
-    // and Rejected: K of M, return 0 or 1.
-    println("Not implemented: errors")
-    return 2
+    var rejectedCount = 0
+    var totalLines = 0
+    forEachScheduleLine(command.file) { lineNumber, line ->
+        totalLines++
+        val result = parseSessionLine(lineNumber, line)
+        if (result is ParseResult.Failure) {
+            rejectedCount++
+            println(formatFailure(result))
+        }
+    }
+    println("Rejected: $rejectedCount of $totalLines")
+    return if (rejectedCount > 0) 1 else 0
 }

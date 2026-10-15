@@ -108,6 +108,87 @@ python tools/verify.py --huge
 
 **Основную проверку и итоговую оценку проводит лабник.** Он изучает код, проверяет устройство модели, соблюдение инвариантов, защиту коллекций, делегирование, обработку ошибок и пограничные случаи. Собственные тесты и объяснение принятых решений остаются обязательной частью работы.
 
-## Сдача
+## Сдача и описание реализации
 
-Отправьте одну ссылку на свой репозиторий в Academy. Оставьте инструкции сборки и запуска, допишите в README обоснование выбора типов, защиту коллекций, объяснение делегирования и собственные попытки сломать модель. Список требований — в [условии](docs/assignment.md).
+### 1. Обоснование выбора типов (`class` vs `data class`)
+
+Для классов занятий (`Lecture`, `Practice`, `Exam`, `Cancelled`) был выбран обычный **`class`**, а не `data class`.
+
+**Причина выбора:**
+`data class` в Kotlin автоматически генерирует метод `.copy()`, принимающий аргументы по умолчанию и вызывающий первичный конструктор. Это создаёт уязвимость для обхода инвариантов:
+* Вызов `.copy(teachers = mutableList)` может передать внешнюю изменяемую коллекцию напрямую, если конструктор не защищён специальным образом.
+* Класс `Cancelled` по требованию ТЗ не имеет свойств `location` и `teachers`.
+* Обычный `class` полностью контролирует свой публичный API, не предоставляет неконтролируемых методов мутации/копирования и гарантирует, что объект невозможно получить в обход проверок.
+
+---
+
+### 2. Защита коллекций
+
+В Kotlin тип `List<T>` является read-only интерфейсом, но **не гарантирует неизменяемости** (immutable) на платформе JVM: под ним может лежать ссылка на `java.util.ArrayList`.
+
+Для защиты состояния модели применено защитное копирование через **`java.util.List.copyOf`**:
+1. **Защита от изменения внешнего списка**: в конструкторах `Lecture`, `Practice`, `Exam` список преподавателей копируется:
+   ```kotlin
+   val teachers: List<String> = java.util.List.copyOf(teachers_raw)
+   ```
+   Если внешний код вызовет `.clear()` или `.add()` у исходного `MutableList`, объект занятия не изменится.
+2. **Защита выданного списка**: метод `java.util.List.copyOf` возвращает неизменяемую реализацию списка (`ImmutableCollections`). Любая попытка вызова мутирующих методов (даже через приведение типа `(teachers as MutableList).add(...)`) приводит к `UnsupportedOperationException`.
+3. **Снимки репозитория**: метод `all()` репозитория также возвращает `java.util.List.copyOf(sessions)`. Добавление новых элементов в репозиторий после вызова `all()` не меняет ранее полученный снимок.
+
+---
+
+### 3. Делегирование реестра (`AuditedSessionRepository`)
+
+Репозиторий аудита реализован с использованием ключевого слова `by`:
+```kotlin
+class AuditedSessionRepository(private val delegate: delegate) : SessionRepository by delegate
+```
+
+#### Ответ на вопрос: Почему переопределить только `add` недостаточно для учёта вызовов `addAll`?
+
+Делегирование интерфейса (`by delegate`) в Kotlin построено на **композиции**, а не на полиморфизме виртуальных вызовов:
+1. Вызов метода `addAll(sessions)` у `AuditedSessionRepository` без явного переопределения уходит напрямую в `delegate.addAll(sessions)`.
+2. Даже если реализация `delegate` внутри своего класса вызывает `this.add()`, ссылка `this` указывает на сам внутренний объект `delegate`, а **не** на внешний `AuditedSessionRepository`.
+3. В результате переопределённый метод `add` обёртки **вообще не вызовется**, и аудит пропустит добавленные занятия.
+
+Поэтому метод `addAll` обязан быть переопределён в `AuditedSessionRepository` явно.
+
+---
+
+### 4. Проверка «Сломай свою модель»
+
+В тестовом классе `app/src/test/kotlin/schedule/SessionTest.kt` реализованы проверки всех 8 сценариев из задания:
+
+| № | Попытка нарушения | Что защищает модель | Тест |
+|---|---|---|---|
+| 1 | Создать занятие с пустой темой | Проверка при создании: `require(topic_is_valid(topic))` | `test01_cannotCreateSessionWithEmptyOrBlankTopic` |
+| 2 | Создать занятие с годом 0 или 10000 | Проверка при создании: `require(year_is_valid(date))` | `test02_cannotCreateSessionWithInvalidYear` |
+| 3 | Создать действующее занятие без преподавателей | Проверка при создании: `require(teachers.isNotEmpty())` | `test03_cannotCreateActiveSessionWithoutTeachers` |
+| 4 | Создать сдачу с 1 преподавателем | Проверка при создании: `require(teachers.size >= 2)` | `test04_cannotCreateExamWithLessThanTwoTeachers` |
+| 5 | Создать сдачу с двумя одинаковыми преподавателями | Проверка при создании: `require(teachers_is_valid(teachers))` (проверка уникальности) | `test05_cannotCreateExamWithDuplicateTeachers` |
+| 6 | Изменить исходный список после создания | Защита коллекции: `java.util.List.copyOf(teachers_raw)` отвязывает объект от внешней ссылки | `test06_mutatingOriginalListDoesNotAffectSession` |
+| 7 | Изменить состояние через выданный список | Защита коллекции: `java.util.List.copyOf` возвращает JVM-неизменяемый список | `test07_cannotMutateSessionThroughReturnedTeachersList` |
+| 8 | Обойти проверки через `copy` | Устройство типа: используется обычный `class`, метод `copy` отсутствует в API | `test08_copyMethodIsNotExposedOnRegularClasses` |
+| - | Создать отмену со свойствами места/учителей | Устройство типа: у класса `Cancelled` свойства места и учителей отсутствуют вовсе | `test13_allFourTypesCreatedSuccessfully` |
+
+---
+
+### 5. Сообщения об ошибках парсера
+
+Парсер строк (`app/src/main/kotlin/schedule/Parser.kt`) форматирует ошибки по строгому приоритету:
+
+1. `line N: invalid field separator`
+2. `line N: got X fields, expected 5`
+3. `line N: empty required field "<fieldName>"`
+4. `line N: invalid date "<rawValue>"`
+5. `line N: unknown session type "<rawValue>"`
+6. `line N: type "EXAM" requires at least 2 teachers, got X`
+7. `line N: control characters in field "<fieldName>"`
+8. `line N: outer whitespace in field "<fieldName>"`
+9. `line N: cancelled session field "<fieldName>" must be "-"`
+10. `line N: invalid active session location "<rawValue>"`
+11. `line N: invalid teacher name "<rawValue>"`
+12. `line N: duplicate teacher name "<name>"`
+
+Спецсимволы экранируются: `\\`, `\"`, а управляющие и не-ASCII символы приводятся к виду `\uXXXX`.
+

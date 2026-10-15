@@ -3,7 +3,7 @@ plugins {
     application
 }
 kotlin {
-    jvmToolchain(25)
+    jvmToolchain(26)
     compilerOptions { allWarningsAsErrors.set(true) }
 }
 dependencies {
